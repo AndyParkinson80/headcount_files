@@ -45,6 +45,7 @@ first_day_this_month = today.replace(day=1)
 last_day_last_month = first_day_this_month - timedelta(days=1)
 last_day_str = last_day_last_month.strftime("%Y-%m-%d")
 
+print (last_day_str)
 
 def google_auth():
     try:
@@ -97,6 +98,7 @@ def load_keys(country):
         "cascade_API_id": "cascade_API_id",
         "keyfile": f"{country}_cert_key",
         "certfile": f"{country}_cert_pem",
+        "service_acc": "cascadeId_to_drop"
     }
 
     secrets = {k: get_secret(v) for k, v in secret_ids.items()}
@@ -110,6 +112,7 @@ def load_keys(country):
         secrets["cascade_API_id"],
         secrets["keyfile"],
         secrets["certfile"],
+        secrets["service_acc"]
     )
 
 def load_ssl(certfile_content, keyfile_content):
@@ -204,7 +207,6 @@ def api_call_cascade(cascade_token,api_url,api_params=None,api_data=None):
 def GET_workers_cascade():
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("    Retrieving current Personal Data from Cascade HR (" + time_now + ")")
-    global cascade_responses
 
     cascade_responses = []
     skip_param = 0
@@ -227,7 +229,7 @@ def GET_workers_cascade():
                 "$top": page_size,
                 "$skip": skip_param,
                 "$filter": (
-                    f"(EmploymentLeftDate eq null or EmploymentLeftDate gt {last_day_str}T00:00:00Z) "
+                    f"(EmploymentLeftDate eq null or EmploymentLeftDate ge {last_day_str}T00:00:00Z) "
                     f"and EmploymentStartDate le {last_day_str}T00:00:00Z"
                 )
             }
@@ -239,10 +241,17 @@ def GET_workers_cascade():
                 json_data = json_data['value']
                 cascade_responses.extend(json_data)    
 
-    if data_export:
-        export_data("001 - Cascade Raw Out.json", cascade_responses)    
+    print("Filtering out service accounts...")
 
-    return cascade_responses
+    filtered_responses = [
+        record for record in cascade_responses
+        if str(record.get("DisplayId")) not in service_acc
+    ]
+
+    if data_export:
+        export_data("001 - Cascade Raw Out.json", filtered_responses)    
+
+    return filtered_responses
 
 def extract_display_ids_to_excel(cascade_responses, filename="display_ids.xlsx"):
     """
@@ -272,7 +281,7 @@ if __name__ == "__main__":
     
     creds, project_Id = google_auth()
     for c in countries:
-        client_id, client_secret, strings_to_exclude, country_hierarchy_USA, country_hierarchy_CAN, cascade_API_id, keyfile, certfile = load_keys(c)
+        client_id, client_secret, strings_to_exclude, country_hierarchy_USA, country_hierarchy_CAN, cascade_API_id, keyfile, certfile, service_acc = load_keys(c)
         certfile, keyfile = load_ssl(certfile, keyfile)
         adp_tokens[c] = adp_bearer(client_id,client_secret,certfile,keyfile)
         
@@ -282,5 +291,6 @@ if __name__ == "__main__":
     cascade_token = cascade_bearer (cascade_API_id)
 
     cascade_responses = GET_workers_cascade()
-    extract_display_ids_to_excel(cascade_responses)
+    extract_display_ids_to_excel(cascade_responses) #Used to check parity with headcount report from cascade
+
 
