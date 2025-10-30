@@ -29,14 +29,19 @@ cascade_jobs_url = 'https://api.iris.co.uk/hr/v2/jobs?%24count=true'
 cascade_hierarchy_url = 'https://api.iris.co.uk/hr/v2/hierarchy?%24count=true'
 
 current_folder = Path(__file__).resolve().parent
-data_export = True
+data_export = False
 
 today = date.today()
 first_day_this_month = today.replace(day=1)
+first_day_this_year = today.replace(month=1, day=1)
+first_day_this_year_str = first_day_this_year.strftime("%Y-%m-%d")
+
 last_day_last_month = first_day_this_month - timedelta(days=1)
 last_day_str = last_day_last_month.strftime("%Y-%m-%d")
 
-print (last_day_str)
+print (f"Headcounts as of {last_day_str}")
+print (f"Leavers between {first_day_this_year_str} and {last_day_str}")
+print ("")
 
 def google_auth():
     try:
@@ -58,7 +63,7 @@ def google_auth():
             return credentials, project_id
 
         # 3. Local dev (service account file path)
-        file_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+        file_path = os.getenv("GCP")
         if file_path and os.path.exists(file_path):
             credentials = service_account.Credentials.from_service_account_file(file_path)
             with open(file_path) as f:
@@ -244,13 +249,9 @@ def GET_workers_cascade():
 
     return filtered_responses
 
-def GET_jobs_cascade():
+def GET_leavers_cascade():
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print ("    Retrieving current Jobs Data from Cascade HR (" + time_now + ")")
-
-    # Calculate six months ago
-    six_months_ago = today - timedelta(days=180)
-    six_months_ago_str = six_months_ago.strftime("%Y-%m-%d")
+    print ("    Retrieving current Leavers from Cascade HR (" + time_now + ")")
 
     cascade_responses = []
     skip_param = 0
@@ -258,7 +259,58 @@ def GET_jobs_cascade():
 
     api_params = {
         "$filter": (
-            f"EndDate eq null or EndDate ge {six_months_ago_str}T00:00:00Z"
+            f"EmploymentLeftDate ge {first_day_this_year_str}T00:00:00Z and EmploymentLeftDate le {last_day_str}T00:00:00Z"
+            )  
+        }
+
+    api_response = api_call_cascade(cascade_token,cascade_workers_url,api_params,None)
+    api_calls = api_count_cascade(api_response,page_size)        
+
+    for i in range(api_calls):
+            skip_param = i * page_size
+            
+            api_params = {
+                "$top": page_size,
+                "$skip": skip_param,
+                "$filter": (
+                    f"EmploymentLeftDate ge {first_day_this_year_str}T00:00:00Z and EmploymentLeftDate le {last_day_str}T00:00:00Z"
+                )
+            }
+
+            api_response = api_call_cascade(cascade_token,cascade_workers_url,api_params)
+
+            if api_response.status_code == 200:
+                json_data = api_response.json()
+                json_data = json_data['value']
+                cascade_responses.extend(json_data)    
+
+    print("         Filtering out service accounts...")
+    filtered_responses = [
+        record for record in cascade_responses
+        if str(record.get("DisplayId")) not in service_acc
+    ]
+
+    if data_export:
+        export_data("002a - Cascade Leavers Raw.json", cascade_responses)    
+        export_data("002b - Cascade Leavers Filtered.json", filtered_responses)    
+
+    return filtered_responses
+
+def GET_jobs_cascade():
+    time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print ("    Retrieving current Jobs Data from Cascade HR (" + time_now + ")")
+
+    # Calculate six months ago
+    previous_jobs = today - timedelta(days=400)
+    previous_jobs_str = previous_jobs.strftime("%Y-%m-%d")
+
+    cascade_responses = []
+    skip_param = 0
+    page_size = 200
+
+    api_params = {
+        "$filter": (
+            f"EndDate eq null or EndDate ge {previous_jobs_str}T00:00:00Z"
             )  
         }
 
@@ -272,7 +324,7 @@ def GET_jobs_cascade():
                 "$top": page_size,
                 "$skip": skip_param,
                 "$filter": (
-                    f"EndDate eq null or EndDate ge {six_months_ago_str}T00:00:00Z"
+                    f"EndDate eq null or EndDate ge {previous_jobs_str}T00:00:00Z"
                 )
             }
 
@@ -320,27 +372,6 @@ def GET_hierarchy_cascade():
         export_data("001c - Cascade Hierarchy Nodes.json", cascade_responses)    
 
     return cascade_responses
-
-def extract_display_ids_to_csv(cascade_responses, filename="Data/display_ids.csv"):
-    """
-    Extract DisplayId values from cascade_responses and write to CSV file.
-    
-    Args:
-        cascade_responses: List of dictionaries containing worker data
-        filename: Output CSV filename (default: "display_ids.csv")
-    """
-    # Extract DisplayId values
-    display_ids = [record.get('DisplayId') for record in cascade_responses]
-    
-    # Create a DataFrame
-    df = pd.DataFrame({'DisplayId': display_ids})
-    
-    # Write to CSV
-    df.to_csv(filename, index=False)
-    
-    print(f"        Exported {len(display_ids)} DisplayId values to {filename}")
-    
-    return df
 
 def determine_payroll(L2, L3, L4, L6):
     # Convert to string and handle None values
@@ -463,9 +494,147 @@ def rearrange_cascade(cascade_responses,cascade_jobs):
         }
 
         rearranged.append(transformed_record)
-    
-    export_data("001 - Cascade rearranged.json", rearranged)    
+    if data_export:
+        export_data("001e - Cascade rearranged.json", rearranged)    
     return rearranged
+
+def time_difference(start, end):
+    # Check if either parameter is None
+    if start is None or end is None:
+        return None,None
+    
+    date_of_birth = datetime.fromisoformat(start.replace('Z', '+00:00'))
+    last_working_date = datetime.fromisoformat(end.replace('Z', '+00:00'))
+    
+    # Calculate years
+    years = last_working_date.year - date_of_birth.year
+    
+    # Calculate months
+    months = last_working_date.month - date_of_birth.month
+    
+    # Adjust if the day hasn't been reached yet in the current month
+    if last_working_date.day < date_of_birth.day:
+        months -= 1
+    
+    # Adjust if months is negative
+    if months < 0:
+        years -= 1
+        months += 12
+    
+    return years, months
+
+def find_line_manager(ID, cascade_jobs, cascade_responses):
+    LM_ID = None
+    line_manager = None
+    
+    # Find the line manager ID
+    for job in cascade_jobs:
+        if job["EmployeeId"] == ID:
+            LM_ID = job["LineManagerId"]
+            break  # Exit once found
+    
+    # If no line manager ID was found, return None values
+    if LM_ID is None:
+        return None, None
+    
+    # Find the line manager details
+    for record in cascade_responses:
+        if record["Id"] == LM_ID:
+            lm_known_as = record["KnownAs"]
+            lm_surname = record["LastName"]
+            lm_id = record["DisplayId"]
+            line_manager = f"({lm_id}) {lm_known_as} {lm_surname}"
+            break  # Exit once found
+    
+    # If line manager wasn't found in cascade_responses, use API
+    if line_manager is None:
+        api_url = f"https://api.iris.co.uk/hr/v2/employees/{LM_ID}"
+        api_response = api_call_cascade(cascade_token, api_url, None)
+        
+        if api_response.status_code == 200:
+            json_data = api_response.json()
+            # Format the API response to match expected format
+            lm_known_as = json_data.get("KnownAs", "")
+            lm_surname = json_data.get("LastName", "")
+            lm_id = json_data.get("DisplayId", "")
+            line_manager = f"({lm_id}) {lm_known_as} {lm_surname}"
+    
+    return line_manager
+
+def rearrange_leavers(cascade_responses,cascade_leavers,cascade_jobs):
+    rearranged = []
+    for record in cascade_leavers:
+        id = record["Id"]
+        displayId = record["DisplayId"]
+        surname = record["LastName"]
+        knownAs = record["KnownAs"]
+        leaver_reason = record["LeaverReason"]        
+        leaver_date = record["EmploymentLeftDate"]
+        dob = record["DateOfBirth"]
+
+        StartDateStr = record["EmploymentStartDate"]
+        StartDate = datetime.strptime(StartDateStr, '%Y-%m-%dT%H:%M:%SZ')
+        StartDate = StartDate.strftime('%d/%m/%Y')
+        
+        age_years,age_months = time_difference(dob,leaver_date)
+        los_years,los_months = time_difference(StartDateStr,leaver_date)
+        LOS_months = 12 * los_years + los_months
+        
+        for job in cascade_jobs:
+            if record["Id"] == job["EmployeeId"]:
+                jobTitle = job.get("JobTitle","")
+                hierarchyId = job["HierarchyNodeId"]
+                H1,H2,H3,H4,H5,H6,payroll_name = build_hierarchy_path(hierarchyId)
+
+        line_manager = find_line_manager(id, cascade_jobs,cascade_responses)
+        
+
+        transformed_record = {
+            "Employee Id": displayId,
+            "Surname": surname,
+            "Known As": knownAs,
+            "Leaver": "Yes",
+            "Leaver Reason": leaver_reason,
+            "Start Date": StartDate,
+            "Contract End Date": leaver_date,
+            "Hierarchy Level 3": H3,
+            "Hierarchy Level 4": H4,
+            "Hierarchy Level 5": H5,
+            "Works for": line_manager,
+            "Age": f"{age_years} Yrs {age_months} Mths",
+            "Length of Service":  f"{los_years} Yrs {los_months} Mths",
+            "LOS Months": LOS_months,
+            "Job Title": jobTitle,
+            "Payroll Name": payroll_name,           
+
+        }
+
+        rearranged.append(transformed_record)
+    
+    # After you've built your rearranged list, sort it
+    rearranged.sort(key=lambda x: x["Contract End Date"] if x["Contract End Date"] else "")
+
+    if data_export:
+        export_data("002e - Leavers rearranged.json", rearranged)    
+    return rearranged
+
+def export_to_excel_headcounts(rearranged_cascade):
+    df = pd.json_normalize(rearranged_cascade)
+
+    df['Display Id'] = pd.to_numeric(df['Display Id'], errors='coerce').astype('Int64')
+    df['Cont. Service Date'] = pd.to_datetime(df['Cont. Service Date'], format='%d/%m/%Y', errors='coerce')
+    df['Contract End Date'] = pd.to_datetime(df['Contract End Date'], format='%d/%m/%Y', errors='coerce')
+
+    df.to_excel(f"Data/Cascade Headcounts ({last_day_str}).xlsx", index=False)
+
+def export_to_excel_leavers(rearranged_leavers):
+    df = pd.json_normalize(rearranged_leavers)
+
+    df['Employee Id'] = pd.to_numeric(df['Employee Id'], errors='coerce').astype('Int64')
+    df['Start Date'] = pd.to_datetime(df['Start Date'], format='%d/%m/%Y', errors='coerce')
+    df['Contract End Date'] = pd.to_datetime(df['Contract End Date'], format='%d/%m/%Y', errors='coerce')
+
+    df.to_excel(f"Data/Cascade Leaver ({last_day_str}).xlsx", index=False)
 
 if __name__ == "__main__":
     countries = ["usa","can"]
@@ -483,18 +652,14 @@ if __name__ == "__main__":
     cascade_token = cascade_bearer (cascade_API_id)
     service_acc = json.loads(service_acc)
 
+    #Current Headcount 
     cascade_responses = GET_workers_cascade()
     cascade_jobs = GET_jobs_cascade()
     cascade_hierarchy_nodes = GET_hierarchy_cascade()
-    #extract_display_ids_to_csv(cascade_responses) #Used to check parity with headcount report from cascade
     rearranged_cascade = rearrange_cascade(cascade_responses,cascade_jobs)
+    export_to_excel_headcounts(rearranged_cascade)
 
-    df = pd.json_normalize(rearranged_cascade)
-
-    df['Display Id'] = pd.to_numeric(df['Display Id'], errors='coerce').astype('Int64')
-
-    df['Cont. Service Date'] = pd.to_datetime(df['Cont. Service Date'], format='%d/%m/%Y', errors='coerce')
-    df['Contract End Date'] = pd.to_datetime(df['Contract End Date'], format='%d/%m/%Y', errors='coerce')
-
-    # Export to Excel
-    df.to_excel("Data/output.xlsx", index=False)
+    #Leavers
+    cascade_leavers = GET_leavers_cascade()
+    rearranged_leavers = rearrange_leavers(cascade_responses,cascade_leavers,cascade_jobs)
+    export_to_excel_leavers(rearranged_leavers)
