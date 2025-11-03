@@ -183,6 +183,8 @@ def export_data(filename, variable):
     with open(file_path, "w", encoding='utf-8') as outfile:
         json.dump(variable, outfile, indent=4, ensure_ascii=False)
 
+#----------------
+
 def api_count_cascade(api_response,page_size):
     response_data = api_response.json()
     total_number = response_data['@odata.count']
@@ -199,6 +201,35 @@ def api_call_cascade(cascade_token,api_url,api_params=None,api_data=None):
     time.sleep(0.6)   
    
     return api_response
+
+def api_count_adp(page_size,url,headers,type):
+
+    api_count_params = {
+            "$filter": f"workers/workAssignments/assignmentStatus/statusCode/codeValue eq '{type}'",
+            "count": "true",
+        }
+    
+    api_count_response = requests.get(url, cert=(certfile, keyfile), verify=True, headers=headers, params=api_count_params) 
+    response_data = api_count_response.json()
+    total_number = response_data.get("meta", {}).get("totalNumber", 0)
+    api_calls = math.ceil(total_number / page_size)
+
+    return api_calls
+
+def api_call(page_size,skip_param,api_url,api_headers,type):
+    
+    api_params = {
+    "$filter": f"workers/workAssignments/assignmentStatus/statusCode/codeValue eq '{type}'",
+    "$top": page_size,
+    "$skip": skip_param
+    }
+
+    api_response = requests.get(api_url,cert=(certfile, keyfile), headers = api_headers, params = api_params)
+    time.sleep(0.6)   
+
+    return api_response    
+
+#----------------
 
 def GET_workers_cascade():
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -569,15 +600,18 @@ def rearrange_leavers(cascade_responses,cascade_leavers,cascade_jobs):
         surname = record["LastName"]
         knownAs = record["KnownAs"]
         leaver_reason = record["LeaverReason"]        
-        leaver_date = record["EmploymentLeftDate"]
         dob = record["DateOfBirth"]
 
         StartDateStr = record["EmploymentStartDate"]
         StartDate = datetime.strptime(StartDateStr, '%Y-%m-%dT%H:%M:%SZ')
         StartDate = StartDate.strftime('%d/%m/%Y')
-        
-        age_years,age_months = time_difference(dob,leaver_date)
-        los_years,los_months = time_difference(StartDateStr,leaver_date)
+
+        leaver_date_str = record["EmploymentLeftDate"]
+        leaver_date = datetime.strptime(leaver_date_str, '%Y-%m-%dT%H:%M:%SZ')
+        leaver_date = leaver_date.strftime('%d/%m/%Y')
+       
+        age_years,age_months = time_difference(dob,leaver_date_str)
+        los_years,los_months = time_difference(StartDateStr,leaver_date_str)
         LOS_months = 12 * los_years + los_months
         
         for job in cascade_jobs:
@@ -618,6 +652,128 @@ def rearrange_leavers(cascade_responses,cascade_leavers,cascade_jobs):
         export_data("002e - Leavers rearranged.json", rearranged)    
     return rearranged
 
+def status_type(status):
+    status_map = {
+        "active": "A",
+        "terminated": "T",
+        "leave": "L"
+    }
+    return status_map.get(status)
+
+def GET_workers_adp(c):
+
+    global adp_active_usa,adp_leave_usa,adp_all_usa
+    global adp_active_can,adp_leave_can,adp_all_can
+
+    adp_active_usa = []
+    adp_leave_usa = []
+    adp_all_usa =[]
+
+    adp_active_can = []
+    adp_leave_can = []
+    adp_all_usa = []  
+
+    for status in ["active","leave"]:
+        print (f"       Downloading ADP Staff with the status - {status}")
+               
+        type = status_type (status)
+        page_size = 100
+        
+        if c == "usa":
+            adp_token = adp_token_usa
+        else:
+            adp_token = adp_token_can
+
+        api_headers = {
+            'Authorization': f'Bearer {adp_token}',
+            'Accept':"application/json;masked=false"
+            }
+        
+        api_calls = api_count_adp(page_size,adp_workers_url,api_headers,type)
+        for i in range(api_calls):
+            skip_param = i * page_size
+
+            api_response = api_call(page_size,skip_param,adp_workers_url,api_headers,type)
+
+            if api_response.status_code == 200:
+                json_data = api_response.json()
+                json_data = json_data['workers']
+           
+                filtered_data = [
+                    worker for worker in json_data 
+                    if worker.get('workerID', {}).get('idValue') not in strings_to_exclude
+                ]
+                    
+                globals()[f"adp_{status}_{c}"].extend(filtered_data)
+            else:
+                continue   
+
+    adp_all_usa = adp_active_usa + adp_leave_usa
+    adp_all_can = adp_active_can + adp_leave_can
+
+    if c == "usa":
+        adp_all_usa = adp_active_usa + adp_leave_usa
+        if data_export:
+            export_data(f"003 - ADP all raw {c}.json",adp_all_usa)
+        return adp_all_usa
+    else:
+        adp_all_can = adp_active_can + adp_leave_can
+        if data_export:
+            export_data(f"003 - ADP all raw {c}.json",adp_all_can)
+        return adp_all_can
+
+def find_active_job_position(worker):
+    active_job_position = None
+
+    work_assignments = worker.get("workAssignments", [{}])
+    for index, assignment in enumerate(work_assignments):
+        if assignment.get("primaryIndicator", True):
+            active_job_position = index
+            continue
+    return active_job_position
+
+def rearrange_adp_staff(data,c):
+    rearranged_usa = []
+    rearranged_can = []
+
+    for record in data:
+        active_job_position = find_active_job_position(record)
+
+        name = record["person"]["legalName"]["formattedName"]
+        position = record["workAssignments"][active_job_position]["positionID"]
+        status = record["workAssignments"][active_job_position]["assignmentStatus"]["statusCode"]["longName"]
+        hireDate = record["workAssignments"][active_job_position]["hireDate"]
+        departmentNumber = record["workAssignments"][active_job_position]["homeOrganizationalUnits"][1]["nameCode"].get("codeValue","")
+        departmentShortName = record["workAssignments"][active_job_position]["homeOrganizationalUnits"][1]["nameCode"].get("shortName",None)
+        departmentLongName = record["workAssignments"][active_job_position]["homeOrganizationalUnits"][1]["nameCode"].get("longName",None)
+
+        departmentName = departmentShortName if departmentShortName is not None else departmentLongName
+
+        transformed_record = {
+            "Name": name,
+            "Position ID": position,
+            "Employee Status": status,
+            "Hire Date": hireDate,
+            "Home Department": f"{departmentNumber} - {departmentName}"
+        }
+
+        if c == "usa":
+            rearranged_usa.append(transformed_record)
+        else:
+            rearranged_can.append(transformed_record)
+
+    if data_export:
+        if c == "usa":
+            export_data(f"003a - ADP rearranged - {c}.json", rearranged_usa)    
+        else:
+            export_data(f"003a - ADP rearranged - {c}.json", rearranged_can)    
+
+    if c == "usa":
+        return rearranged_usa
+    else:
+        return rearranged_can
+
+#----------------
 def export_to_excel_headcounts(rearranged_cascade):
     df = pd.json_normalize(rearranged_cascade)
 
@@ -636,18 +792,31 @@ def export_to_excel_leavers(rearranged_leavers):
 
     df.to_excel(f"Data/Cascade Leaver ({last_day_str}).xlsx", index=False)
 
+def export_to_excel_adp(data,c):
+    df = pd.json_normalize(data)
+
+    df['Hire Date'] = pd.to_datetime(df['Hire Date'], format='%Y-%m-%d', errors='coerce')
+
+    df.to_excel(f"Data/ADP Data - {c} ({last_day_str}).xlsx", index=False)    
+
 if __name__ == "__main__":
     countries = ["usa","can"]
+    #countries = ["usa"]
+
     adp_tokens = {}
     
     creds, project_Id = google_auth()
+
     for c in countries:
         client_id, client_secret, strings_to_exclude, country_hierarchy_USA, country_hierarchy_CAN, cascade_API_id, keyfile, certfile, service_acc = load_keys(c)
         certfile, keyfile = load_ssl(certfile, keyfile)
         adp_tokens[c] = adp_bearer(client_id,client_secret,certfile,keyfile)
         
-    adp_token_usa = adp_tokens.get('usa')
-    adp_token_can = adp_tokens.get('can')
+        adp_token_usa = adp_tokens.get('usa')
+        adp_token_can = adp_tokens.get('can')
+        adp_all   = GET_workers_adp(c)
+        adp_rearranged = rearrange_adp_staff(adp_all,c)
+        export_to_excel_adp(adp_rearranged,c)
     
     cascade_token = cascade_bearer (cascade_API_id)
     service_acc = json.loads(service_acc)
