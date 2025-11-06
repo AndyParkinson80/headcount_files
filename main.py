@@ -671,7 +671,7 @@ def GET_workers_adp(c):
 
     adp_active_can = []
     adp_leave_can = []
-    adp_all_usa = []  
+    adp_all_can = []  
 
     for status in ["active","leave"]:
         print (f"       Downloading ADP Staff with the status - {status}")
@@ -679,10 +679,7 @@ def GET_workers_adp(c):
         type = status_type (status)
         page_size = 100
         
-        if c == "usa":
-            adp_token = adp_token_usa
-        else:
-            adp_token = adp_token_can
+        adp_token = {"usa": adp_token_usa, "can": adp_token_can}[c]
 
         api_headers = {
             'Authorization': f'Bearer {adp_token}',
@@ -708,19 +705,15 @@ def GET_workers_adp(c):
             else:
                 continue   
 
-    adp_all_usa = adp_active_usa + adp_leave_usa
-    adp_all_can = adp_active_can + adp_leave_can
+    adp_all = {
+        "usa": adp_active_usa + adp_leave_usa,
+        "can": adp_active_can + adp_leave_can,
+    }[c]
 
-    if c == "usa":
-        adp_all_usa = adp_active_usa + adp_leave_usa
-        if data_export:
-            export_data(f"003 - ADP all raw {c}.json",adp_all_usa)
-        return adp_all_usa
-    else:
-        adp_all_can = adp_active_can + adp_leave_can
-        if data_export:
-            export_data(f"003 - ADP all raw {c}.json",adp_all_can)
-        return adp_all_can
+    if data_export:
+        export_data(f"003 - ADP all raw {c}.json", adp_all)
+
+    return adp_all
 
 def find_active_job_position(worker):
     active_job_position = None
@@ -735,6 +728,8 @@ def find_active_job_position(worker):
 def rearrange_adp_staff(data,c):
     rearranged_usa = []
     rearranged_can = []
+
+    target_list = rearranged_usa if c == "usa" else rearranged_can
 
     for record in data:
         active_job_position = find_active_job_position(record)
@@ -757,23 +752,15 @@ def rearrange_adp_staff(data,c):
             "Home Department": f"{departmentNumber} - {departmentName}"
         }
 
-        if c == "usa":
-            rearranged_usa.append(transformed_record)
-        else:
-            rearranged_can.append(transformed_record)
+        target_list.append(transformed_record)
 
     if data_export:
-        if c == "usa":
-            export_data(f"003a - ADP rearranged - {c}.json", rearranged_usa)    
-        else:
-            export_data(f"003a - ADP rearranged - {c}.json", rearranged_can)    
+        export_data(f"003a - ADP rearranged - {c}.json", target_list)
 
-    if c == "usa":
-        return rearranged_usa
-    else:
-        return rearranged_can
+    return target_list
 
 #----------------
+
 def export_to_excel_headcounts(rearranged_cascade):
     df = pd.json_normalize(rearranged_cascade)
 
